@@ -17,6 +17,7 @@ import CocoaLumberjackSwift
 import NetworkExtension
 import Sentry
 
+// 没有实际干活, 只是封装 OutlineVpn.shared
 @objcMembers
 class OutlinePlugin: CDVPlugin {
 
@@ -79,7 +80,9 @@ class OutlinePlugin: CDVPlugin {
       return sendError("Invalid configuration", callbackId: command.callbackId,
                        errorCode: OutlineVpn.ErrorCode.illegalServerConfiguration)
     }
+    // 保存一些设置
     let tunnel = OutlineTunnel(id: tunnelId, config: config)
+    // OutlineVpn.shared 是一个单例
     OutlineVpn.shared.start(tunnel) { errorCode in
       if errorCode == OutlineVpn.ErrorCode.noError {
         #if os(macOS)
@@ -121,6 +124,7 @@ class OutlinePlugin: CDVPlugin {
     sendSuccess(OutlineVpn.shared.isActive(tunnelId), callbackId: command.callbackId)
   }
 
+  // 检查 ss 服务器是否可达
   func isServerReachable(_ command: CDVInvokedUrlCommand) {
     DDLogInfo("isServerReachable")
     guard let host = command.argument(at: 0) as? String else {
@@ -201,6 +205,7 @@ class OutlinePlugin: CDVPlugin {
     }
   }
 
+  // 链接状态变化
   // Receives NEVPNStatusDidChange notifications. Calls onTunnelStatusChange for the active
   // tunnel.
   func onVpnStatusChange(vpnStatus: NEVPNStatus, tunnelId: String) {

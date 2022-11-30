@@ -16,6 +16,7 @@ import CocoaLumberjack
 import CocoaLumberjackSwift
 import NetworkExtension
 
+// 实际并没有干活, 只是发送控制指令和配置给 XPC
 // Manages the system's VPN tunnel through the VpnExtension process.
 @objcMembers
 class OutlineVpn: NSObject {
@@ -379,4 +380,3 @@ class OutlineVpn: NSObject {
   }
 
 }
-

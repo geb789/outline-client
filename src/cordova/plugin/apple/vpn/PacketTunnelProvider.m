@@ -13,10 +13,10 @@
 // limitations under the License.
 
 #import "PacketTunnelProvider.h"
+#import <Tun2Socks/Tun2socks.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <netdb.h>
-#import <Tun2Socks/Tun2socks.h>
 #include "VpnExtension-Swift.h"
 
 const DDLogLevel ddLogLevel = DDLogLevelInfo;
@@ -35,12 +35,12 @@ NSString *const kMessageKeyOnDemand = @"is-on-demand";
 NSString *const kDefaultPathKey = @"defaultPath";
 static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
 
-@interface PacketTunnelProvider ()<Tun2socksTunWriter>
-@property (nonatomic) NSString *hostNetworkAddress;  // IP address of the host in the active network.
+@interface PacketTunnelProvider () <Tun2socksTunWriter>
+@property(nonatomic) NSString *hostNetworkAddress;  // IP address of the host in the active network.
 @property id<Tun2socksOutlineTunnel> tunnel;
-@property (nonatomic, copy) void (^startCompletion)(NSNumber *);
-@property (nonatomic, copy) void (^stopCompletion)(NSNumber *);
-@property (nonatomic) DDFileLogger *fileLogger;
+@property(nonatomic, copy) void (^startCompletion)(NSNumber *);
+@property(nonatomic, copy) void (^stopCompletion)(NSNumber *);
+@property(nonatomic) DDFileLogger *fileLogger;
 @property(nonatomic) OutlineTunnel *tunnelConfig;
 @property(nonatomic) OutlineTunnelStore *tunnelStore;
 @property(nonatomic) dispatch_queue_t packetQueue;
@@ -50,16 +50,17 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
 
 - (id)init {
   self = [super init];
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE  // 设置组名
   NSString *appGroup = @"group.org.outline.ios.client";
-#else
+#else  // macos
   NSString *appGroup = @"QT8Z3Q9V3A.org.outline.macos.client";
 #endif
-  NSURL *containerUrl = [[NSFileManager defaultManager]
-                         containerURLForSecurityApplicationGroupIdentifier:appGroup];
+  // 定义日志文件
+  NSURL *containerUrl =
+      [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:appGroup];
   NSString *logsDirectory = [[containerUrl path] stringByAppendingPathComponent:@"Logs"];
-  id<DDLogFileManager> logFileManager = [[DDLogFileManagerDefault alloc]
-                                         initWithLogsDirectory:logsDirectory];
+  id<DDLogFileManager> logFileManager =
+      [[DDLogFileManagerDefault alloc] initWithLogsDirectory:logsDirectory];
   _fileLogger = [[DDFileLogger alloc] initWithLogFileManager:logFileManager];
 #if TARGET_OS_IPHONE
   [DDLog addLogger:[DDOSLogger sharedInstance]];
@@ -72,6 +73,7 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
 #endif
   [DDLog addLogger:_fileLogger];
 
+  // 定义一个 OutlineTunnelStore, 初始化载入局域网IP段
   _tunnelStore = [[OutlineTunnelStore alloc] initWithAppGroup:appGroup];
   kVpnSubnetCandidates = @{
     @"10" : @"10.111.222.0",
@@ -85,7 +87,10 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
   return self;
 }
 
+// 开启一个系统 TUN (一种虚拟网卡)
 - (void)startTunnelWithOptions:(NSDictionary *)options
+             // (void (^)(NSError *)) 声明该参数是一个回调函数, 该函数的参数是 NSError 类型,
+             // 返回值是 void
              completionHandler:(void (^)(NSError *))completionHandler {
   DDLogInfo(@"Starting tunnel");
   if (options == nil) {
@@ -103,6 +108,7 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
         }];
     return;
   }
+  // OC函数调用, 等价于C++: auto tunnelConfig = self->retrieveTunnelConfig(options);
   OutlineTunnel *tunnelConfig = [self retrieveTunnelConfig:options];
   if (tunnelConfig == nil) {
     DDLogError(@"Failed to retrieve the tunnel config.");
@@ -131,7 +137,8 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
   // culprit and can explicitly disconnect.
   long errorCode = noError;
   if (!isOnDemand) {
-    ShadowsocksClient* client = [self getClient];
+    // 启动 ss 客户端
+    ShadowsocksClient *client = [self getClient];
     if (client == nil) {
       return completionHandler([NSError errorWithDomain:NEVPNErrorDomain
                                                    code:NEVPNErrorConfigurationInvalid
@@ -146,12 +153,14 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
                                              userInfo:nil]);
   }
 
+  // 创建一个 TUN 设备
   [self connectTunnel:[self getTunnelNetworkSettings]
            completion:^(NSError *_Nullable error) {
              if (error != nil) {
                [self execAppCallbackForAction:kActionStart errorCode:vpnPermissionNotGranted];
                return completionHandler(error);
              }
+             // 检查是否支持 UDP
              BOOL isUdpSupported =
                  isOnDemand ? self.tunnelStore.isUdpSupported : errorCode == noError;
              if (![self startTun2Socks:isUdpSupported]) {
@@ -160,6 +169,7 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
                                                             code:NEVPNErrorConnectionFailed
                                                         userInfo:nil]);
              }
+             // 保存状态
              [self listenForNetworkChanges];
              [self.tunnelStore save:tunnelConfig];
              self.tunnelStore.isUdpSupported = isUdpSupported;
@@ -180,15 +190,19 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
   completionHandler();
 }
 
+// 接收并处理来自 App 的消息
 // Receives messages and callbacks from the app. The callback will be executed asynchronously,
 // echoing the provided data on success and nil on error.
 // Expects |messageData| to be JSON encoded.
-- (void)handleAppMessage:(NSData *)messageData completionHandler:(void (^)(NSData *))completionHandler {
+- (void)handleAppMessage:(NSData *)messageData
+       completionHandler:(void (^)(NSData *))completionHandler {
   if (messageData == nil) {
     DDLogError(@"Received nil message from app");
     return;
   }
-  NSDictionary *message = [NSJSONSerialization JSONObjectWithData:messageData options:kNilOptions error:nil];
+  NSDictionary *message = [NSJSONSerialization JSONObjectWithData:messageData
+                                                          options:kNilOptions
+                                                            error:nil];
   if (message == nil) {
     DDLogError(@"Failed to receive message from app");
     return;
@@ -212,7 +226,9 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
       kMessageKeyErrorCode : errorCode,
       kMessageKeyTunnelId : tunnelId
     };
-    completionHandler([NSJSONSerialization dataWithJSONObject:response options:kNilOptions error:nil]);
+    completionHandler([NSJSONSerialization dataWithJSONObject:response
+                                                      options:kNilOptions
+                                                        error:nil]);
   };
   if ([kActionStart isEqualToString:action] || [kActionRestart isEqualToString:action]) {
     self.startCompletion = callbackWrapper;
@@ -244,7 +260,9 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
       errorCode = serverUnreachable;
     }
     NSDictionary *response = @{kMessageKeyErrorCode : [NSNumber numberWithLong:errorCode]};
-    completionHandler([NSJSONSerialization dataWithJSONObject:response options:kNilOptions error:nil]);
+    completionHandler([NSJSONSerialization dataWithJSONObject:response
+                                                      options:kNilOptions
+                                                        error:nil]);
   }
 }
 
@@ -258,6 +276,7 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
 - (OutlineTunnel *)retrieveTunnelConfig:(NSDictionary *)config {
   OutlineTunnel *tunnelConfig;
   if (config != nil && !config[kMessageKeyOnDemand]) {
+    // 初始化系统 TUN 配置
     tunnelConfig = [[OutlineTunnel alloc] initWithId:config[kMessageKeyTunnelId] config:config];
   } else if (self.tunnelStore != nil) {
     DDLogInfo(@"Retrieving tunnelConfig from store.");
@@ -266,17 +285,17 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
   return tunnelConfig;
 }
 
-# pragma mark - Network
+#pragma mark - Network
 
-- (ShadowsocksClient*) getClient {
-  ShadowsocksConfig* config = [[ShadowsocksConfig alloc] init];
+- (ShadowsocksClient *)getClient {
+  ShadowsocksConfig *config = [[ShadowsocksConfig alloc] init];
   config.host = self.hostNetworkAddress;
   config.port = [self.tunnelConfig.port intValue];
   config.password = self.tunnelConfig.password;
   config.cipherName = self.tunnelConfig.method;
   config.prefix = self.tunnelConfig.prefix;
   NSError *err;
-  ShadowsocksClient* client = ShadowsocksNewClient(config, &err);
+  ShadowsocksClient *client = ShadowsocksNewClient(config, &err);
   if (err != nil) {
     DDLogInfo(@"Failed to construct client.");
   }
@@ -286,24 +305,28 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
 - (void)connectTunnel:(NEPacketTunnelNetworkSettings *)settings
            completion:(void (^)(NSError *))completionHandler {
   __weak PacketTunnelProvider *weakSelf = self;
-  [self setTunnelNetworkSettings:settings completionHandler:^(NSError * _Nullable error) {
-    if (error != nil) {
-      DDLogError(@"Failed to set tunnel network settings: %@", error.localizedDescription);
-    } else {
-      DDLogInfo(@"Tunnel connected");
-      // Passing nil settings clears the tunnel network configuration. Indicate to the system that
-      // the tunnel is being re-established if this is the case.
-      weakSelf.reasserting = settings == nil;
-    }
-    completionHandler(error);
-  }];
+  // 调用系统 TUN 接口
+  [self setTunnelNetworkSettings:settings
+               completionHandler:^(NSError *_Nullable error) {
+                 if (error != nil) {
+                   DDLogError(@"Failed to set tunnel network settings: %@",
+                              error.localizedDescription);
+                 } else {
+                   DDLogInfo(@"Tunnel connected");
+                   // Passing nil settings clears the tunnel network configuration. Indicate to the
+                   // system that the tunnel is being re-established if this is the case.
+                   weakSelf.reasserting = settings == nil;
+                 }
+                 completionHandler(error);
+               }];
 }
 
-- (NEPacketTunnelNetworkSettings *) getTunnelNetworkSettings {
+// 从系统 TUN 接口读取配置
+- (NEPacketTunnelNetworkSettings *)getTunnelNetworkSettings {
   NSString *vpnAddress = [self selectVpnAddress];
   NEIPv4Settings *ipv4Settings = [[NEIPv4Settings alloc] initWithAddresses:@[ vpnAddress ]
                                                                subnetMasks:@[ @"255.255.255.0" ]];
-  ipv4Settings.includedRoutes = @[[NEIPv4Route defaultRoute]];
+  ipv4Settings.includedRoutes = @[ [NEIPv4Route defaultRoute] ];
   ipv4Settings.excludedRoutes = [self getExcludedIpv4Routes];
 
   // The remote address is not used for routing, but for display in Settings > VPN > Outline.
@@ -316,6 +339,7 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
   return settings;
 }
 
+// 获取IPv4路由
 - (NSArray *)getExcludedIpv4Routes {
   NSMutableArray *excludedIpv4Routes = [[NSMutableArray alloc] init];
   for (Subnet *subnet in [Subnet getReservedSubnets]) {
@@ -326,6 +350,7 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
   return excludedIpv4Routes;
 }
 
+// 监听网络接口变化
 // Registers KVO for the `defaultPath` property to receive network connectivity changes.
 - (void)listenForNetworkChanges {
   [self stopListeningForNetworkChanges];
@@ -335,6 +360,7 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
             context:nil];
 }
 
+// 停止监听网络接口变化
 // Unregisters KVO for `defaultPath`.
 - (void)stopListeningForNetworkChanges {
   @try {
@@ -366,6 +392,8 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
   });
 }
 
+// 刚刚注册上的监听器，当网络接口变化时，会调用这个方法
+// 有变化就发消息给 app 那边
 - (void)handleNetworkChange:(NWPath *)newDefaultPath {
   DDLogInfo(@"Network connectivity changed");
   if (newDefaultPath.status == NWPathStatusSatisfied) {
@@ -377,13 +405,15 @@ static NSDictionary *kVpnSubnetCandidates;  // Subnets to bind the VPN.
     [self reconnectTunnel:false];
   } else {
     DDLogInfo(@"Clearing tunnel settings.");
-    [self connectTunnel:nil completion:^(NSError * _Nullable error) {
-      if (error != nil) {
-        DDLogError(@"Failed to clear tunnel network settings: %@", error.localizedDescription);
-      } else {
-        DDLogInfo(@"Tunnel settings cleared");
-      }
-    }];
+    [self connectTunnel:nil
+             completion:^(NSError *_Nullable error) {
+               if (error != nil) {
+                 DDLogError(@"Failed to clear tunnel network settings: %@",
+                            error.localizedDescription);
+               } else {
+                 DDLogInfo(@"Tunnel settings cleared");
+               }
+             }];
   }
 }
 
@@ -408,16 +438,13 @@ bool getIpAddressString(const struct sockaddr *sa, char *s, socklen_t maxbytes) 
   return true;
 }
 
-// Calls getaddrinfo to retrieve the IP address literal as a string for |ipv4Str| in the active network.
-// This is necessary to support IPv6 DNS64/NAT64 networks. For more details see:
+// Calls getaddrinfo to retrieve the IP address literal as a string for |ipv4Str| in the active
+// network. This is necessary to support IPv6 DNS64/NAT64 networks. For more details see:
 // https://developer.apple.com/library/content/documentation/NetworkingInternetWeb/Conceptual/NetworkingOverview/UnderstandingandPreparingfortheIPv6Transition/UnderstandingandPreparingfortheIPv6Transition.html
 - (NSString *)getNetworkIpAddress:(const char *)ipv4Str {
   struct addrinfo *info;
   struct addrinfo hints = {
-    .ai_family = PF_UNSPEC,
-    .ai_socktype = SOCK_STREAM,
-    .ai_flags = AI_DEFAULT
-  };
+      .ai_family = PF_UNSPEC, .ai_socktype = SOCK_STREAM, .ai_flags = AI_DEFAULT};
   int error = getaddrinfo(ipv4Str, NULL, &hints, &info);
   if (error) {
     DDLogError(@"getaddrinfo failed: %s", gai_strerror(error));
@@ -456,6 +483,7 @@ bool getIpAddressString(const struct sockaddr *sa, char *s, socklen_t maxbytes) 
   return addresses;
 }
 
+// 选一个 IP 作为 VPN IP 段
 // Selects an IPv4 address for the VPN to bind to from a pool of private subnets by checking against
 // the subnets assigned to the existing network interfaces.
 - (NSString *)selectVpnAddress {
@@ -484,6 +512,7 @@ bool getIpAddressString(const struct sockaddr *sa, char *s, socklen_t maxbytes) 
 
 #pragma mark - tun2socks
 
+// 重连
 // Restarts tun2socks if |configChanged| or the host's IP address has changed in the network.
 - (void)reconnectTunnel:(bool)configChanged {
   if (!self.tunnelConfig || !self.tunnel) {
@@ -511,7 +540,7 @@ bool getIpAddressString(const struct sockaddr *sa, char *s, socklen_t maxbytes) 
 
   DDLogInfo(@"Configuration or host IP address changed with the network. Reconnecting tunnel.");
   self.hostNetworkAddress = activeHostNetworkAddress;
-  ShadowsocksClient* client = [self getClient];
+  ShadowsocksClient *client = [self getClient];
   if (client == nil) {
     [self execAppCallbackForAction:kActionStart errorCode:illegalServerConfiguration];
     [self cancelTunnelWithError:[NSError errorWithDomain:NEVPNErrorDomain
@@ -560,6 +589,8 @@ bool getIpAddressString(const struct sockaddr *sa, char *s, socklen_t maxbytes) 
   return YES;
 }
 
+// 实际从 TUN 读取到的数据通过这个 handler 处理
+// 读了数据放进 socks5 里面
 // Writes packets from the VPN to the tunnel.
 - (void)processPackets {
   __weak typeof(self) weakSelf = self;
@@ -575,19 +606,19 @@ bool getIpAddressString(const struct sockaddr *sa, char *s, socklen_t maxbytes) 
   }];
 }
 
+// 启动 tun2socks, tun2socks 是一个转换 TUN 和 SOCKS5 数据结构的开源库
 - (BOOL)startTun2Socks:(BOOL)isUdpSupported {
   BOOL isRestart = self.tunnel != nil && self.tunnel.isConnected;
   if (isRestart) {
     [self.tunnel disconnect];
   }
   __weak PacketTunnelProvider *weakSelf = self;
-  ShadowsocksClient* client = [self getClient];
+  ShadowsocksClient *client = [self getClient];
   if (client == nil) {
     return NO;
   }
-  NSError* err;
-  self.tunnel = Tun2socksConnectShadowsocksTunnel(
-      weakSelf, client, isUdpSupported, &err);
+  NSError *err;
+  self.tunnel = Tun2socksConnectShadowsocksTunnel(weakSelf, client, isUdpSupported, &err);
   if (err != nil) {
     DDLogError(@"Failed to start tun2socks: %@", err);
     return NO;
@@ -600,7 +631,7 @@ bool getIpAddressString(const struct sockaddr *sa, char *s, socklen_t maxbytes) 
   return YES;
 }
 
-# pragma mark - App IPC
+#pragma mark - App IPC
 
 // Executes a callback stored in |callbackMap| for the given |action|. |errorCode| is passed to the
 // app to indicate the operation success.
